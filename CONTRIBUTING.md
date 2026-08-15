@@ -3,10 +3,6 @@
 **Language / Idioma:** [English](#english) · [Español](#español)
 
 > **Contact / Contacto:** `sebas_saeu@hotmail.com`
-> This is a placeholder. The author must replace it with a working address
-> before the repository is made public.
-> Es un marcador de posición. El autor debe sustituirlo por una dirección
-> real antes de publicar el repositorio.
 
 ---
 
