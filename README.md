@@ -43,7 +43,7 @@ That price is what this repository measures first.
 
 ---
 
-**Why "Swarmbly"?** *Swarm* and *assembly*. The swarm is the easy half — running many models at once is a scheduling problem, and scheduling was solved decades ago. The assembly is the hard half: a swarm produces fragments, and turning fragments into one coherent answer is where quality is lost and where this design can fail. The name puts the difficult part in the word. Full reasoning, including what the name deliberately does *not* claim: [`docs/NAMING.md`](docs/NAMING.md).
+**Why "Swarmbly"?** *Swarm* and *assembly*. The swarm is the easy half — running many models at once is a scheduling problem, and scheduling was solved decades ago. The assembly is the hard half: a swarm produces fragments, and turning fragments into one coherent answer is where quality is lost and where this design can fail. The name puts the difficult part in the word.
 
 ## V0 — the coherence-tax harness
 
