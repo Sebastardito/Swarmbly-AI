@@ -1,0 +1,76 @@
+{
+  "title": "Swarmbly AI: Decentralized AI Inference by Fragmenting the Problem, Not the Model",
+  "description": "<p>Peer-to-peer language-model inference today splits the <em>model</em>: layers or tensors are spread across machines and activations cross the public internet on every generated token, against bandwidth and latency gaps of four to five orders of magnitude. This work specifies <strong>Swarmbly</strong>, a protocol that distributes the <em>problem</em> instead. A client-side orchestrator decomposes a request into a dependency graph of semantic micro-tasks, each dispatched once and asynchronously to a volunteer node running a complete 1&ndash;8B model; returned fragments are verified, selected and spliced locally, so the network is crossed once per fragment per session rather than once per layer per token.</p><p><strong>Substantive contributions.</strong></p><ol><li><strong>The context budget <em>S</em></strong> &mdash; the shared context carried by each dispatched fragment &mdash; is identified as a single scalar on which assembly coherence, fragment verifiability, privacy by decontextualization and required worker capability all depend, with opposing signs. Viability reduces to whether some <em>S</em> satisfies all four thresholds at once, stated as a falsifiable proposition.</li><li><strong>A coverage model for semantic assembly</strong>, in which the pre-generation plan acts as the reference sequence and packet loss rather than sample placement is the stochastic element, yielding the design equation <code>c &ge; ln(1/&epsilon;)/(1&minus;p)</code> and an operating range of 3&ndash;5 replicas per critical unit.</li><li><strong>Consensus by multiple alignment</strong> of replicas produced by nodes of deliberately different model families, which returns with every answer a per-unit agreement score and a <strong>map of low-confidence regions</strong> &mdash; a signal a provider running a single model has nothing to align, and therefore cannot produce. Disclosed as a mechanism: its correlation with correctness was measured and came back flat, so no reliability benefit is claimed for it.</li></ol><p>A fourth element, added in v1.3, is <strong>dynamic privacy tiering</strong>: a client-side classifier routes each request into an open volunteer mesh, a permissioned &ldquo;trusted swarm&rdquo; whose membership is a cryptographic public-key whitelist under mutual TLS, or purely local execution &mdash; the same protocol at every tier, with the replica count reducible inside a trusted swarm only under an explicit declaration that no confidence map was produced.</p><p><strong>First measurements.</strong> Against three model families served locally, the coherence tax falls monotonically in the context budget &mdash; 24.1 %, 20.4 %, 16.1 %, 13.7 % across the swept range &mdash; and the abandonment criterion fixed in advance is met in three task categories. The same run finds no relationship between inter-replica agreement and judged quality (r = &minus;0.030 over 597 semantic units), which leaves the confidence map unsupported rather than refuted; both results are reported in full.</p><p>The deposition also contains the wire protocol, the assembly and verification algorithms, and a reference harness that measures the <em>coherence tax</em> against a stated abandonment criterion.</p><p><strong>Scope of claims.</strong> No claim is made of latency parity, unlimited context, cryptographic confidentiality, or a demonstrated environmental benefit. Limitations and negative results are stated in full in Section 12 of the whitepaper.</p><p><strong>Contents:</strong> whitepaper v1.4 (English and Spanish), protocol specification v0.2 revision 2, and the V0 coherence-tax reference implementation (178 tests).</p><p><strong>Licensing:</strong> the software and specification are released under AGPL-3.0-or-later &mdash; clause 13 (remote network interaction) applies to hosted deployments, see the NOTICE file. The document text is CC BY 4.0.</p>",
+  "upload_type": "publication",
+  "publication_type": "preprint",
+  "publication_date": "2026-08-14",
+  "version": "1.4.0",
+  "language": "eng",
+  "access_right": "open",
+  "license": "AGPL-3.0-or-later",
+  "creators": [
+    {
+      "name": "Espinoza-Ulloa, Sebastián A.",
+      "affiliation": "Independent Researcher",
+      "orcid": "0000-0003-1497-356X"
+    }
+  ],
+  "keywords": [
+    "distributed inference",
+    "decentralized AI",
+    "peer-to-peer",
+    "P2P",
+    "small language models",
+    "SLM",
+    "problem decomposition",
+    "task decomposition",
+    "shotgun assembly",
+    "sequence assembly",
+    "contig",
+    "consensus",
+    "volunteer computing",
+    "LLM orchestration",
+    "protocol specification",
+    "edge inference",
+    "AGPL"
+  ],
+  "subjects": [
+    {
+      "term": "Distributed, Parallel, and Cluster Computing",
+      "identifier": "cs.DC",
+      "scheme": "arxiv"
+    },
+    {
+      "term": "Computation and Language",
+      "identifier": "cs.CL",
+      "scheme": "arxiv"
+    },
+    {
+      "term": "Cryptography and Security",
+      "identifier": "cs.CR",
+      "scheme": "arxiv"
+    }
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/Sebastardito/Swarmbly-AI",
+      "relation": "isSupplementTo",
+      "resource_type": "software",
+      "scheme": "url"
+    },
+    {
+      "identifier": "https://github.com/Sebastardito/Swarmbly-AI/tree/main/docs",
+      "relation": "isDocumentedBy",
+      "resource_type": "publication-technicalnote",
+      "scheme": "url"
+    },
+    {
+      "identifier": "https://github.com/Sebastardito/Swarmbly-AI/releases",
+      "relation": "isDerivedFrom",
+      "resource_type": "software",
+      "scheme": "url"
+    }
+  ],
+  "notes": "Defensive publication. This work is released publicly to establish dated, enabling prior art; see publication/PRIOR_ART.md and publication/IPCOM_DISCLOSURE.md in the repository. The author asserts no patent claims over the disclosed techniques and places them in the public domain for patenting purposes. Governance intent is documented in GOVERNANCE.md (Swiss Verein now, Stiftung later; DCO not CLA; no premine and no transferable token).",
+  "communities": []
+}

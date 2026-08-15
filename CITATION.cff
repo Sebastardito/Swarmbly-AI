@@ -1,0 +1,148 @@
+# ---------------------------------------------------------------------------
+# Citation File Format (CFF) 1.2.0
+# https://citation-file-format.github.io/
+#
+# PLACEHOLDERS THE AUTHOR MUST REPLACE BEFORE PUBLICATION are marked with
+# the token REEMPLAZAR. Search this file for "REEMPLAZAR" and resolve every
+# hit. Fields that cannot yet be known (DOIs, ORCID) are commented out where
+# leaving an invalid value would break CFF validation, and are flagged below.
+# ---------------------------------------------------------------------------
+
+cff-version: 1.2.0
+message: >-
+  If you use Swarmbly AI — the protocol, the specification, or the reference
+  implementation — in academic work, please cite both the software (this
+  file) and the whitepaper (see `preferred-citation` below).
+type: software
+
+title: "Swarmbly AI"
+abstract: >-
+  Peer-to-peer language-model inference today splits the MODEL: layers or
+  tensors are spread across machines and activations cross the public internet
+  on every generated token, against bandwidth and latency gaps of four to five
+  orders of magnitude. Swarmbly is a protocol that distributes the PROBLEM
+  instead. A client-side orchestrator decomposes a request into a dependency
+  graph of semantic micro-tasks, each dispatched once and asynchronously to a
+  volunteer node running a complete small language model (1–8B parameters);
+  returned fragments are verified, selected and spliced locally, so the network
+  is crossed once per fragment per session rather than once per layer per
+  token. Three substantive contributions follow. First, the context budget S —
+  the shared context carried by each dispatched fragment — is identified as a
+  single scalar on which assembly coherence, fragment verifiability, privacy by
+  decontextualization and required worker capability all depend, with opposing
+  signs; viability reduces to whether some S satisfies all four thresholds at
+  once, stated as a falsifiable proposition. Second, a coverage model for
+  semantic assembly, in which the pre-generation plan acts as the reference
+  sequence and packet loss rather than sample placement is the stochastic
+  element, yields the design equation c >= ln(1/eps)/(1-p) and an operating
+  range of 3–5 replicas per critical unit. Third, consensus by multiple
+  alignment of replicas produced by nodes of deliberately different model
+  families returns, with every answer, a per-unit agreement score and a map of
+  low-confidence regions — a reliability signal that a provider running a
+  single model has nothing to align, and therefore cannot produce. The release
+  also specifies the wire protocol, the assembly and verification algorithms,
+  and a reference harness that measures the coherence tax against a stated
+  abandonment criterion. No claim is made of latency parity, unlimited context,
+  cryptographic confidentiality or a demonstrated environmental benefit;
+  limitations and negative results are stated in full. This release comprises
+  whitepaper v1.4, protocol specification v0.2 (revision 2), and the V0 reference
+  implementation.
+
+version: "1.4.0"
+date-released: "2026-08-14"
+license: AGPL-3.0-or-later
+
+authors:
+  - given-names: "Sebastián A."
+    family-names: "Espinoza-Ulloa"
+    affiliation: "Independent Researcher"
+    email: "sebas_saeu@hotmail.com"
+    orcid: "https://orcid.org/0000-0003-1497-356X"
+
+repository-code: "https://github.com/Sebastardito/Swarmbly-AI"
+url: "https://github.com/Sebastardito/Swarmbly-AI"
+# ^ Sebastardito: substitute the actual GitHub owner (user or organization)
+#   once the repository is created. Repo name is fixed: Swarmbly-AI.
+
+# doi: "10.5281/zenodo.REEMPLAZAR"   # REEMPLAZAR — Zenodo mints this on the
+#   first archived release. Uncomment and fill after the Zenodo deposition.
+
+keywords:
+  - "distributed inference"
+  - "decentralized AI"
+  - "peer-to-peer"
+  - "small language models"
+  - "SLM"
+  - "problem decomposition"
+  - "task decomposition"
+  - "shotgun assembly"
+  - "sequence assembly"
+  - "consensus"
+  - "volunteer computing"
+  - "LLM orchestration"
+  - "protocol specification"
+  - "AGPL"
+
+contact:
+  - given-names: "Sebastián A."
+    family-names: "Espinoza-Ulloa"
+    affiliation: "Independent Researcher"
+    email: "sebas_saeu@hotmail.com"
+
+references:
+  - type: software
+    title: "Petals: Collaborative Inference and Fine-tuning of Large Models"
+    abstract: >-
+      Referenced as the closest prior system in the distributed-inference
+      space. Petals shards a single large model across participants; Swarmbly
+      is contrasted against it because it shards the problem instead. Listed
+      here for orientation; the authoritative bibliography with full author
+      lists and identifiers is REFERENCES.md in this project.
+    authors:
+      - name: "The Petals project contributors"
+    notes: >-
+      REEMPLAZAR — replace with the complete, verified bibliographic entry
+      (full author list, year, venue, DOI/arXiv ID) taken from REFERENCES.md.
+      Not filled in here because inventing bibliographic detail is worse than
+      leaving it explicitly blank.
+
+preferred-citation:
+  type: article
+  title: >-
+    Swarmbly: Decentralized AI Inference by Fragmenting the Problem, Not the
+    Model
+  abstract: >-
+    Whitepaper v1.4 specifying the Swarmbly protocol: semantic decomposition of
+    a request into micro-tasks, asynchronous dispatch to volunteer nodes each
+    running a complete small language model, and local reassembly by a
+    client-side orchestrator. Its three substantive contributions are the
+    context budget S as the single scalar governing coherence, verifiability,
+    privacy and required worker capability; a coverage model for semantic
+    assembly giving the design equation c >= ln(1/eps)/(1-p); and consensus by
+    multiple alignment of cross-family replicas, which returns a per-unit
+    agreement score and a map of low-confidence regions that centralized
+    inference cannot produce. Limitations and negative results are stated in
+    full.
+  authors:
+    - given-names: "Sebastián"
+      family-names: "Espinoza"
+      affiliation: "Independent Researcher"
+      email: "sebas_saeu@hotmail.com"
+  year: 2026
+  month: 8
+  # --- Identifiers: all REEMPLAZAR ---------------------------------------
+  # `doi` below is a PLACEHOLDER and is deliberately obvious. It is NOT a
+  # resolvable DOI. Replace it with the DOI issued by arXiv (arXiv assigns
+  # DOIs of the form 10.48550/arXiv.YYMM.NNNNN) or by Zenodo, whichever is
+  # used as the canonical record for the paper. Delete the field entirely if
+  # no DOI has been minted yet — a fake DOI in a published CITATION.cff is
+  # worse than an absent one.
+  # doi: "10.48550/arXiv.YYMM.NNNNN"   # UNCOMMENT and fill after arXiv assigns it.
+  # Deliberately absent rather than fake: an unresolvable DOI in a published
+  # CITATION.cff is worse than no DOI at all.
+  # journal: "REEMPLAZAR"          # not applicable while it is a preprint
+  # url: "https://arxiv.org/abs/REEMPLAZAR"   # REEMPLAZAR after submission
+  notes: >-
+    Preprint. Intended submission venue: arXiv, primary category cs.DC. See
+    publication/ARXIV_SUBMISSION.md for the submission checklist and for which
+    facts were verified and which the author must confirm on arxiv.org.

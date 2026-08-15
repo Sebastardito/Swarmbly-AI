@@ -1,0 +1,1061 @@
+"""The V0 sweep: coherence tax as a function of ``rho`` and ``N``.
+
+The question V0 exists to answer::
+
+    How much output quality is lost by fragmenting and reassembling,
+    as a function of how much context travels with each fragment?
+
+and the headline number it produces::
+
+    coherence_tax = (monolithic_score - fragmented_score) / monolithic_score
+
+measured separately on two instruments (the BooookScore-style taxonomy and the
+entity grid), for every cell of the ``rho x N`` grid, for every prompt
+category.
+
+Go / no-go
+----------
+The master document's continuation criterion: **there must exist a ``rho`` at
+which coherence degradation is <5% relative to monolithic generation, in at
+least one task category.** :func:`summarize` evaluates exactly that and returns
+a verdict. With ``MockBackend`` the verdict is meaningless as evidence -- see
+the warning in :mod:`swarmbly_v0.backends` -- but the machinery that computes it
+is the machinery a real run will use unchanged.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
+
+import numpy as np
+
+from .assembler import boundary_windows, select_then_splice
+from .backends import Backend, Embedder, HashEmbedder, get_backend, get_embedder, replica_backends
+from .consensus import (
+    DEFAULT_ACCEPT,
+    DEFAULT_ALPHA_HIGH,
+    DEFAULT_ALPHA_LOW,
+    LABELS,
+    ConsensusResult,
+    Replica,
+    consensus,
+)
+from .metrics import (
+    ERROR_CLASSES,
+    TauCalibration,
+    calibrate_tau,
+    entity_grid_coherence,
+    quality_judge,
+    redundancy,
+    redundancy_between,
+    seam_error_taxonomy,
+)
+from .packing import build_monolithic_prompt, build_packets, packing_floor
+from .planner import global_contract, plan as build_plan, summarize_fragment
+from .router import DEFAULT_THRESHOLD, evaluate_router, is_decomposable
+from .schema import Contract, Fragment, Plan
+from .textutil import count_tokens, split_sentences
+
+__all__ = [
+    "PromptSpec",
+    "SweepConfig",
+    "load_prompts",
+    "DEFAULT_PROMPTS_PATH",
+    "run_monolithic",
+    "run_fragmented",
+    "run_sweep",
+    "write_csv",
+    "write_unit_csv",
+    "read_unit_rows",
+    "agreement_quality_correlation",
+    "summarize",
+    "make_calibration_pairs",
+    "CSV_COLUMNS",
+    "UNIT_CSV_COLUMNS",
+    "UNIT_CSV_NAME",
+    "AGREEMENT_BINS",
+]
+
+DEFAULT_PROMPTS_PATH = Path(__file__).resolve().parent.parent / "prompts" / "prompts.json"
+
+CSV_COLUMNS: list[str] = [
+    "prompt_id",
+    "category",
+    "expected_decomposable",
+    "router_decomposable",
+    "router_score",
+    "condition",
+    "backend",
+    "seed",
+    "n_tasks",
+    "n_levels",
+    "sequential_plan",
+    "rho_target",
+    "rho_achieved",
+    "rho_floor",
+    "rho_reachable",
+    "tau_sem",
+    "k",
+    "n_families",
+    "consensus_used",
+    "mean_agreement",
+    "frac_high",
+    "frac_medium",
+    "frac_low",
+    "n_low_conf_regions",
+    "booook_like_score",
+    "entity_grid",
+    "judge_score",
+    "redundancy_self",
+    "redundancy_between",
+    "n_sentences",
+    "n_seams",
+    "n_bridges",
+    "mean_seam_similarity",
+    "input_tokens",
+    "output_tokens",
+    "coherence_tax_booook",
+    "coherence_tax_entity_grid",
+    "quality_tax_judge",
+    "baseline_booook",
+    "baseline_entity_grid",
+    "baseline_judge",
+] + [f"err_{cls}" for cls in ERROR_CLASSES]
+
+UNIT_CSV_NAME = "agreement_units.csv"
+"""Sidecar written next to ``results.csv`` holding one row per consensus unit.
+
+The sweep CSV is one row per *condition*; the agreement-vs-quality calibration
+needs one row per *unit*, which is a different grain and does not belong in the
+same table. Keeping it as a tidy long-format sidecar (the same pattern
+``run_metadata.json`` already uses) avoids packing a histogram into a cell and
+keeps both files readable on their own.
+"""
+
+UNIT_CSV_COLUMNS: list[str] = [
+    "prompt_id",
+    "category",
+    "condition",
+    "rho_target",
+    "n_tasks",
+    "k",
+    "task_id",
+    "unit_index",
+    "label",
+    "agreement",
+    "judge_score",
+    "accepted",
+]
+
+AGREEMENT_BINS: tuple[float, ...] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0001)
+"""Bin edges for the agreement-vs-acceptability curve (last edge is inclusive)."""
+
+
+@dataclass(frozen=True)
+class PromptSpec:
+    """One labelled prompt from the corpus."""
+
+    prompt_id: str
+    category: str
+    expected_decomposable: bool
+    text: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PromptSpec":
+        return cls(
+            prompt_id=str(data["id"]),
+            category=str(data["category"]),
+            expected_decomposable=bool(data["expected_decomposable"]),
+            text=str(data["prompt"]).strip(),
+        )
+
+
+@dataclass
+class SweepConfig:
+    """Everything that defines a reproducible sweep."""
+
+    rhos: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0)
+    ns: tuple[int, ...] = (2, 4, 8)
+    ks: tuple[int, ...] = (1,)
+    """Replica counts for **micro-level** assembly, swept alongside rho and N.
+
+    ``k = 1`` is the macro-only condition and reproduces the pre-consensus
+    pipeline exactly: one generation per micro-task, no alignment, no agreement
+    map. ``k > 1`` dispatches ``k`` complete replicas of *the same* micro-task
+    to nodes of different families and resolves them by consensus. The two
+    levels are orthogonal -- ``rho`` controls how much context each fragment
+    carries, ``k`` controls how many times each fragment is attempted -- which
+    is why they are swept as a grid rather than traded off.
+    """
+    seed: int = 0
+    backend_name: str = "mock"
+    embedder_name: str = "hash"
+    n_candidates: int = 2
+    beta: float = 0.5
+    router_threshold: float = DEFAULT_THRESHOLD
+    tau_sem: float | None = None  # None => calibrate from the corpus
+    alpha_high: float = DEFAULT_ALPHA_HIGH
+    alpha_low: float = DEFAULT_ALPHA_LOW
+    """Consensus routing thresholds. **Provisional placeholders.**
+
+    They are exposed here for the same reason ``tau_sem`` is: so that a run
+    records which value it used and a calibrated value can replace the default
+    without touching the pipeline. See
+    :func:`swarmbly_v0.metrics.calibrate_alpha`.
+    """
+    accept_threshold: float = DEFAULT_ACCEPT
+    """Judge score at or above which a unit counts as acceptable. Provisional."""
+    max_prompts: int | None = None
+    answer_tokens: int = 420
+    """Answer budget shared by both conditions.
+
+    Both the monolithic baseline and the sum of the fragments target this many
+    tokens, so the two conditions are compared at equal output length. Length
+    must be held fixed: every sentence is an opportunity for a detected error,
+    so a baseline that is three times longer than the fragmented condition
+    would lose on the taxonomy for reasons that have nothing to do with
+    fragmentation.
+    """
+
+
+def load_prompts(path: str | Path | None = None) -> list[PromptSpec]:
+    """Load the labelled prompt corpus (defaults to the bundled ``prompts/``)."""
+    target = Path(path) if path is not None else DEFAULT_PROMPTS_PATH
+    with open(target, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    entries = payload["prompts"] if isinstance(payload, dict) else payload
+    return [PromptSpec.from_dict(entry) for entry in entries]
+
+
+# --------------------------------------------------------------------------
+# Conditions
+# --------------------------------------------------------------------------
+
+
+def _base_row(spec: PromptSpec, config: SweepConfig, backend: Backend) -> dict[str, Any]:
+    decision = is_decomposable(spec.text, config.router_threshold)
+    return {
+        "prompt_id": spec.prompt_id,
+        "category": spec.category,
+        "expected_decomposable": spec.expected_decomposable,
+        "router_decomposable": decision.decomposable,
+        "router_score": round(decision.score, 4),
+        "backend": getattr(backend, "name", "unknown"),
+        "seed": config.seed,
+    }
+
+
+def _fill_metric_row(row: dict[str, Any], text: str, plan: Plan | None,
+                     contract: Contract, embedder: Embedder,
+                     offsets: Sequence[int] | None = None,
+                     fragments: Sequence[str] | None = None) -> dict[str, Any]:
+    """Populate every coherence/quality column for one produced answer."""
+    taxonomy = seam_error_taxonomy(text, plan, offsets, contract)
+    row["booook_like_score"] = round(taxonomy.booook_like_score, 6)
+    row["entity_grid"] = round(entity_grid_coherence(text), 6)
+    row["judge_score"] = round(quality_judge(text, contract, embedder), 6)
+    row["redundancy_self"] = round(float(redundancy(text)), 6)
+    row["redundancy_between"] = round(
+        float(redundancy_between(list(fragments))) if fragments else 0.0, 6
+    )
+    row["n_sentences"] = taxonomy.n_sentences
+    row["output_tokens"] = count_tokens(text)
+    for cls in ERROR_CLASSES:
+        row[f"err_{cls}"] = taxonomy.counts.get(cls, 0)
+    return row
+
+
+def _consensus_columns(
+    k: int,
+    nodes: Sequence[Any],
+    results: Sequence[tuple[str, ConsensusResult]],
+) -> dict[str, Any]:
+    """Aggregate the per-task confidence maps into one row's worth of columns.
+
+    Everything is averaged over **units**, not over tasks, so a task that
+    produced ten units weighs ten times a task that produced one. That is the
+    right grain: the confidence map is per unit, and a task-weighted mean would
+    let a one-sentence fragment cancel a ten-sentence one.
+    """
+    families = {getattr(node, "family", "") or f"node{i}" for i, node in enumerate(nodes)}
+    if k <= 1 or not results:
+        return {
+            "k": k,
+            "n_families": len(families),
+            "consensus_used": False,
+            "mean_agreement": "",
+            "frac_high": "",
+            "frac_medium": "",
+            "frac_low": "",
+            "n_low_conf_regions": "",
+        }
+
+    units = [unit for _, result in results for unit in result.units]
+    n_units = len(units)
+    counts = {label: sum(1 for u in units if u.label == label) for label in LABELS}
+    mean_agreement = (sum(u.agreement for u in units) / n_units) if n_units else 0.0
+    return {
+        "k": k,
+        "n_families": len({f for _, result in results for f in result.families} or families),
+        "consensus_used": True,
+        "mean_agreement": round(mean_agreement, 6),
+        "frac_high": round(counts["HIGH"] / n_units, 6) if n_units else 0.0,
+        "frac_medium": round(counts["MEDIUM"] / n_units, 6) if n_units else 0.0,
+        "frac_low": round(counts["LOW"] / n_units, 6) if n_units else 0.0,
+        "n_low_conf_regions": sum(len(r.low_confidence_regions) for _, r in results),
+    }
+
+
+def _unit_records(
+    spec: PromptSpec,
+    row: dict[str, Any],
+    results: Sequence[tuple[str, ConsensusResult]],
+) -> list[dict[str, Any]]:
+    """One long-format record per consensus unit: agreement against acceptability.
+
+    This is the raw material of the headline calibration number. Each record
+    pairs an agreement score, computed with no reference to quality, with a
+    judge verdict, computed with no reference to agreement. Whether those two
+    move together is the question; assuming they do is the error.
+    """
+    records: list[dict[str, Any]] = []
+    for task_id, result in results:
+        for index, unit in enumerate(result.units):
+            records.append({
+                "prompt_id": spec.prompt_id,
+                "category": spec.category,
+                "condition": row.get("condition", "fragmented"),
+                "rho_target": row.get("rho_target", ""),
+                "n_tasks": row.get("n_tasks", ""),
+                "k": result.k,
+                "task_id": task_id,
+                "unit_index": index,
+                "label": unit.label,
+                "agreement": round(unit.agreement, 6),
+                "judge_score": round(unit.judge_score, 6),
+                "accepted": bool(unit.accepted),
+            })
+    return records
+
+
+def run_monolithic(
+    spec: PromptSpec,
+    backend: Backend,
+    embedder: Embedder,
+    config: SweepConfig,
+    contract: Contract | None = None,
+) -> dict[str, Any]:
+    """The mandatory baseline: one packet, one generation, no assembly.
+
+    Everything the fragmented condition is measured against comes from here,
+    so it uses the same contract, the same target length and the same metric
+    code path -- only the fragmentation is removed.
+    """
+    gamma = contract or global_contract(spec.text, backend)
+    prompt = build_monolithic_prompt(gamma, spec.text)
+    text = backend.generate(prompt, max_tokens=gamma.target_length_tokens)
+
+    row = _base_row(spec, config, backend)
+    row.update({
+        "condition": "monolithic",
+        "n_tasks": 1,
+        "n_levels": 1,
+        "sequential_plan": False,
+        "rho_target": 1.0,
+        "rho_achieved": round(count_tokens(prompt) / max(gamma.prompt_tokens, 1), 6),
+        "rho_floor": 1.0,
+        "rho_reachable": True,
+        "tau_sem": "",
+        # The baseline is deliberately single-replica: it is the denominator of
+        # every coherence-tax number in the run, so it must vary with nothing.
+        "k": 1,
+        "n_families": 1,
+        "consensus_used": False,
+        "mean_agreement": "",
+        "frac_high": "",
+        "frac_medium": "",
+        "frac_low": "",
+        "n_low_conf_regions": "",
+        "n_seams": 0,
+        "n_bridges": 0,
+        "mean_seam_similarity": "",
+        "input_tokens": count_tokens(prompt),
+        "coherence_tax_booook": 0.0,
+        "coherence_tax_entity_grid": 0.0,
+        "quality_tax_judge": 0.0,
+    })
+    _fill_metric_row(row, text, None, gamma, embedder)
+    # Retained for tau calibration; dropped by write_csv (not in CSV_COLUMNS).
+    row["_text"] = text
+    return row
+
+
+def run_fragmented(
+    spec: PromptSpec,
+    backend: Backend,
+    embedder: Embedder,
+    config: SweepConfig,
+    rho_target: float,
+    n_tasks: int,
+    tau_sem: float,
+    baseline: dict[str, Any] | None = None,
+    contract: Contract | None = None,
+    k: int = 1,
+) -> dict[str, Any]:
+    """One cell of the sweep: plan, pack at ``rho_target``, generate, assemble.
+
+    Both levels of assembly run here, in the order the architecture requires:
+
+    * **Micro first.** When ``k > 1``, each micro-task is dispatched ``k`` times
+      to nodes of different model families and the replicas are resolved by
+      :func:`swarmbly_v0.consensus.consensus` into one fragment plus a confidence
+      map. Nothing is split to make the replicas -- each is a complete answer to
+      the whole micro-task.
+    * **Macro second.** The resolved fragments are spliced by
+      :func:`swarmbly_v0.assembler.select_then_splice`.
+
+    At ``k = 1`` the micro level is skipped entirely and the behaviour is
+    identical to the pre-consensus pipeline, which is what makes ``k`` a clean
+    controlled variable rather than a change of code path for every run.
+
+    Generation walks the DAG **level by level**, because a task's packet can
+    only carry summaries of predecessors that have actually been produced.
+    That is also why ``rho`` is not free: the summaries are the tokens.
+    """
+    gamma = contract or global_contract(spec.text, backend)
+    plan = build_plan(spec.text, backend, n_tasks=n_tasks, contract=gamma)
+
+    per_task_target = max(24, round(gamma.target_length_tokens / max(len(plan.tasks), 1)))
+    packing_contract = replace(gamma, target_length_tokens=per_task_target)
+
+    k = max(1, int(k))
+    nodes = replica_backends(backend, k) if k > 1 else [backend]
+
+    summaries: dict[str, str] = {}
+    fragments: list[Fragment] = []
+    packet_tokens_total = 0
+    order_index = {tid: i for i, tid in enumerate(plan.topological_order())}
+    consensus_results: list[tuple[str, ConsensusResult]] = []
+
+    for level in plan.topological_levels():
+        packing = build_packets(packing_contract, plan, rho_target, summaries)
+        by_task = {p.task_id: p for p in packing.packets}
+        for task_id in level:
+            packet = by_task[task_id]
+            # rho stays the *contextual* redundancy ratio: tokens per distinct
+            # packet, not per dispatch. Replica redundancy is a second,
+            # orthogonal cost reported by k and by input_tokens below. Folding
+            # k into rho would make the two indistinguishable in the results.
+            packet_tokens_total += packet.token_count
+            if k > 1:
+                # n_candidates is deliberately not applied here: at the micro
+                # level the k replicas *are* the candidate set, and consensus is
+                # the selection mechanism. Generating variants per replica as
+                # well would confound sampling diversity with family diversity.
+                replicas = [
+                    Replica(
+                        replica_id=f"{task_id}:r{i}",
+                        text=node.generate(packet.text, max_tokens=per_task_target, variant=0),
+                        family=getattr(node, "family", "") or f"node{i}",
+                        model=getattr(node, "model", ""),
+                    )
+                    for i, node in enumerate(nodes)
+                ]
+                result = consensus(
+                    replicas, gamma, embedder, backend,
+                    config.alpha_high, config.alpha_low,
+                    accept_threshold=config.accept_threshold,
+                )
+                consensus_results.append((task_id, result))
+                candidates = [result.text] if result.text.strip() else [replicas[0].text]
+            else:
+                candidates = [
+                    backend.generate(packet.text, max_tokens=per_task_target, variant=v)
+                    for v in range(max(1, config.n_candidates))
+                ]
+            fragments.append(
+                Fragment(task_id=task_id, candidates=candidates,
+                         order=order_index.get(task_id, len(fragments)),
+                         packet_tokens=packet.token_count)
+            )
+            summaries[task_id] = summarize_fragment(candidates[0])
+
+    final_packing = build_packets(packing_contract, plan, rho_target, summaries)
+    rho_achieved = packet_tokens_total / max(count_tokens(spec.text), 1)
+
+    assembly = select_then_splice(
+        fragments, gamma, backend, tau_sem, plan=plan, embedder=embedder
+    )
+
+    row = _base_row(spec, config, backend)
+    row.update({
+        "condition": "fragmented",
+        "n_tasks": len(plan.tasks),
+        "n_levels": len(plan.topological_levels()),
+        "sequential_plan": plan.sequential,
+        "rho_target": rho_target,
+        "rho_achieved": round(rho_achieved, 6),
+        "rho_floor": round(packing_floor(packing_contract, plan), 6),
+        "rho_reachable": final_packing.reachable,
+        "tau_sem": round(tau_sem, 6),
+        "n_seams": len(assembly.seams),
+        "n_bridges": assembly.n_bridges,
+        "mean_seam_similarity": round(assembly.mean_seam_similarity, 6),
+        # Dispatched tokens, not distinct packet tokens: k replicas of a packet
+        # really are k packets on the wire.
+        "input_tokens": packet_tokens_total * k,
+    })
+    row.update(_consensus_columns(k, nodes, consensus_results))
+    selected_texts = [assembly.selected[f.task_id] for f in fragments]
+    _fill_metric_row(row, assembly.text, plan, gamma, embedder,
+                     assembly.fragment_sentence_offsets, selected_texts)
+    row["_unit_records"] = _unit_records(spec, row, consensus_results)
+
+    if baseline:
+        row["coherence_tax_booook"] = _relative_tax(
+            baseline["booook_like_score"], row["booook_like_score"])
+        row["coherence_tax_entity_grid"] = _relative_tax(
+            baseline["entity_grid"], row["entity_grid"])
+        row["quality_tax_judge"] = _relative_tax(
+            baseline["judge_score"], row["judge_score"])
+        # The denominators travel with the ratios. A tax without its baseline
+        # cannot be checked for the instability MIN_BASELINE documents.
+        row["baseline_booook"] = round(float(baseline["booook_like_score"]), 6)
+        row["baseline_entity_grid"] = round(float(baseline["entity_grid"]), 6)
+        row["baseline_judge"] = round(float(baseline["judge_score"]), 6)
+    else:
+        row["coherence_tax_booook"] = ""
+        row["coherence_tax_entity_grid"] = ""
+        row["quality_tax_judge"] = ""
+        row["baseline_booook"] = ""
+        row["baseline_entity_grid"] = ""
+        row["baseline_judge"] = ""
+    return row
+
+
+MIN_BASELINE: float = 0.15
+"""Denominator floor below which a *relative* tax stops being a statistic.
+
+The headline number is a ratio, ``(baseline - fragmented) / baseline``, and its
+denominator is a coherence score that is legitimately allowed to be small. The
+entity grid in particular returns near zero for a short answer with few repeated
+entities, and at ``baseline = 0.05`` an absolute difference of 0.09 becomes a
+*-180 %* "tax" -- a number that says almost nothing about the architecture and
+everything about the denominator.
+
+Cells below this floor are therefore excluded from the aggregate means and
+**counted in the output** rather than dropped quietly, and the mean absolute
+difference is reported alongside every ratio because it is stable regardless of
+the denominator. The per-cell ratio itself is never clipped: clipping would bias
+the headline, which is the opposite failure.
+"""
+
+
+def _relative_tax(baseline: float, fragmented: float) -> float:
+    """Relative degradation ``(baseline - fragmented) / baseline``.
+
+    Negative values mean fragmentation *helped* on that instrument, which does
+    happen and must not be clipped away -- clipping would bias the headline.
+
+    The value is unstable for small ``baseline``; :data:`MIN_BASELINE` and the
+    ``*_unstable_cells`` counters in :func:`summarize` are how that instability
+    is made visible instead of being averaged into the headline.
+    """
+    if not baseline:
+        return 0.0
+    return round((baseline - fragmented) / baseline, 6)
+
+
+# --------------------------------------------------------------------------
+# tau_sem calibration set
+# --------------------------------------------------------------------------
+
+
+def make_calibration_pairs(
+    monolithic_texts: Sequence[str],
+    window_tokens: int = 40,
+    max_per_doc: int = 6,
+) -> list[tuple[str, str, bool]]:
+    """Build labelled ``(left, right, is_seam)`` pairs for tau calibration.
+
+    * **Negative (``is_seam=False``)**: two adjacent windows *inside* one
+      continuously generated answer. Whatever happens at that junction is by
+      construction not a seam -- no assembly occurred there.
+    * **Positive (``is_seam=True``)**: the tail of one answer against the head
+      of a *different* answer. That is a genuine discontinuity.
+
+    The set is balanced by truncation so the F-beta optimum is not an artefact
+    of class imbalance.
+    """
+    negatives: list[tuple[str, str, bool]] = []
+    positives: list[tuple[str, str, bool]] = []
+
+    for text in monolithic_texts:
+        sentences = split_sentences(text)
+        if len(sentences) < 4:
+            continue
+        for cut in range(1, min(len(sentences) - 1, max_per_doc + 1)):
+            left = " ".join(sentences[:cut])
+            right = " ".join(sentences[cut:])
+            lw, rw = boundary_windows(left, right, window_tokens)
+            if lw.strip() and rw.strip():
+                negatives.append((lw, rw, False))
+
+    for i, text in enumerate(monolithic_texts):
+        for j, other in enumerate(monolithic_texts):
+            if i == j:
+                continue
+            lw, rw = boundary_windows(text, other, window_tokens)
+            if lw.strip() and rw.strip():
+                positives.append((lw, rw, True))
+
+    size = min(len(negatives), len(positives))
+    if size == 0:
+        return negatives + positives
+    return negatives[:size] + positives[:size]
+
+
+# --------------------------------------------------------------------------
+# Sweep driver
+# --------------------------------------------------------------------------
+
+
+def run_sweep(
+    prompts: Sequence[PromptSpec],
+    config: SweepConfig | None = None,
+    backend: Backend | None = None,
+    embedder: Embedder | None = None,
+    progress: Any = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run the full ``rho x N`` sweep and return ``(rows, run_metadata)``.
+
+    The monolithic baseline is generated once per prompt and reused for every
+    cell, so the tax numbers in a row all share a denominator.
+    """
+    cfg = config or SweepConfig()
+    used_prompts = list(prompts)[: cfg.max_prompts] if cfg.max_prompts else list(prompts)
+    engine = backend or get_backend(cfg.backend_name, seed=cfg.seed)
+    embed = embedder or get_embedder(cfg.embedder_name)
+
+    contracts = {
+        spec.prompt_id: global_contract(
+            spec.text, engine, target_length_tokens=cfg.answer_tokens
+        )
+        for spec in used_prompts
+    }
+
+    rows: list[dict[str, Any]] = []
+    baselines: dict[str, dict[str, Any]] = {}
+    for spec in used_prompts:
+        baseline = run_monolithic(spec, engine, embed, cfg, contracts[spec.prompt_id])
+        baselines[spec.prompt_id] = baseline
+        rows.append(baseline)
+        if progress:
+            progress(f"baseline  {spec.prompt_id:<28} booook={baseline['booook_like_score']:.3f}")
+
+    # -- calibrate tau_sem instead of hardcoding it ------------------------
+    if cfg.tau_sem is not None:
+        tau = float(cfg.tau_sem)
+        calibration: TauCalibration | None = None
+    else:
+        texts = [str(baselines[s.prompt_id].get("_text", "")) for s in used_prompts]
+        pairs = make_calibration_pairs(texts)
+        calibration = calibrate_tau(pairs, embed, beta=cfg.beta)
+        tau = calibration.tau
+        if progress:
+            progress(
+                f"tau_sem calibrated to {tau:.3f} "
+                f"(F{cfg.beta}={calibration.f_beta:.3f}, P={calibration.precision:.3f}, "
+                f"R={calibration.recall:.3f}, n={calibration.n_pairs})"
+            )
+
+    for spec in used_prompts:
+        for rho in cfg.rhos:
+            for n in cfg.ns:
+                for k in cfg.ks:
+                    row = run_fragmented(
+                        spec, engine, embed, cfg, rho, n, tau,
+                        baseline=baselines[spec.prompt_id],
+                        contract=contracts[spec.prompt_id],
+                        k=k,
+                    )
+                    rows.append(row)
+                    if progress:
+                        agreement = row.get("mean_agreement", "")
+                        agreement_text = (f"agree={agreement:.3f}"
+                                          if isinstance(agreement, float) else "agree=n/a")
+                        progress(
+                            f"sweep     {spec.prompt_id:<28} rho={rho:<5} N={n:<3} k={k:<3} "
+                            f"rho_hat={row['rho_achieved']:.2f} "
+                            f"tax_booook={row['coherence_tax_booook']:+.3f} {agreement_text}"
+                        )
+
+    metadata: dict[str, Any] = {
+        "backend": getattr(engine, "name", "unknown"),
+        "embedder": getattr(embed, "name", type(embed).__name__),
+        "seed": cfg.seed,
+        "rhos": list(cfg.rhos),
+        "ns": list(cfg.ns),
+        "ks": list(cfg.ks),
+        "n_prompts": len(used_prompts),
+        "n_candidates": cfg.n_candidates,
+        "tau_sem": tau,
+        "beta": cfg.beta,
+        "alpha_high": cfg.alpha_high,
+        "alpha_low": cfg.alpha_low,
+        "accept_threshold": cfg.accept_threshold,
+        "alphas_calibrated": False,
+        "router_threshold": cfg.router_threshold,
+        "tau_calibration": calibration.as_dict() if calibration else None,
+        "harness_validation_only": getattr(engine, "name", "") == "mock",
+        "transport_retries": int(getattr(engine, "retries", 0)),
+        "embeddings_degraded": bool(
+            getattr(engine, "embed_degraded", "")
+            or "degraded" in str(getattr(embed, "name", ""))
+        ),
+    }
+    if metadata["embeddings_degraded"]:
+        # tau calibrated on hashed vectors is a number, not a threshold. Say so
+        # in the artifact rather than leaving it to be inferred from a name.
+        metadata["tau_sem_warning"] = (
+            "tau_sem was calibrated on hashed embeddings because the embedding "
+            "route degraded; it carries no semantic meaning and MUST NOT be "
+            "quoted as a calibrated threshold."
+        )
+    return rows, metadata
+
+
+def write_csv(rows: Sequence[dict[str, Any]], path: str | Path) -> Path:
+    """Write ``rows`` as a tidy CSV with the canonical column order.
+
+    When any row carries consensus units, the per-unit sidecar
+    (:data:`UNIT_CSV_NAME`) is written alongside it, so the agreement-vs-quality
+    calibration survives the round trip through disk and ``report`` can render
+    it from a bare CSV path.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({col: row.get(col, "") for col in CSV_COLUMNS})
+    write_unit_csv(rows, target.with_name(UNIT_CSV_NAME))
+    return target
+
+
+def write_unit_csv(rows: Sequence[dict[str, Any]], path: str | Path) -> Path | None:
+    """Write the per-consensus-unit sidecar. Returns ``None`` when there is none."""
+    records = [record for row in rows for record in row.get("_unit_records", [])]
+    if not records:
+        return None
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=UNIT_CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for record in records:
+            writer.writerow({col: record.get(col, "") for col in UNIT_CSV_COLUMNS})
+    return target
+
+
+def read_unit_rows(path: str | Path) -> list[dict[str, Any]]:
+    """Read the per-unit sidecar back, with numbers and booleans parsed."""
+    target = Path(path)
+    if not target.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    with open(target, "r", encoding="utf-8", newline="") as handle:
+        for raw in csv.DictReader(handle):
+            record = dict(raw)
+            for key in ("agreement", "judge_score"):
+                try:
+                    record[key] = float(record.get(key, "") or 0.0)
+                except ValueError:
+                    record[key] = 0.0
+            record["accepted"] = str(record.get("accepted", "")).lower() == "true"
+            for key in ("k", "unit_index", "n_tasks"):
+                try:
+                    record[key] = int(float(record.get(key, "") or 0))
+                except ValueError:
+                    record[key] = 0
+            out.append(record)
+    return out
+
+
+def agreement_quality_correlation(
+    units: Sequence[Mapping[str, Any]],
+    bins: Sequence[float] = AGREEMENT_BINS,
+) -> dict[str, Any]:
+    """Does the agreement score predict judged acceptability?
+
+    The headline micro-level number, and the one the whole confidence map
+    stands or falls on. Agreement is cheap and needs no judge; acceptability
+    needs a judge (or a human). If the two are uncorrelated, then routing on
+    agreement is routing on noise and the ``HIGH`` label is a lie -- so this is
+    reported rather than assumed, and it is reported even when it is bad.
+
+    Args:
+        units: Records with ``agreement`` (float) and ``accepted`` (bool).
+        bins: Bin edges over ``[0, 1]`` for the binned curve.
+
+    Returns:
+        ``pearson_r`` (point-biserial, ``None`` when either variable is
+        constant and the coefficient is undefined), the pooled acceptance rate,
+        the unit count, and one entry per bin with its midpoint, unit count and
+        acceptability rate. Bins holding no units are kept with a ``None`` rate
+        rather than dropped, so a sparse region is visibly sparse.
+    """
+    xs = [float(u["agreement"]) for u in units if "agreement" in u]
+    ys = [1.0 if u.get("accepted") else 0.0 for u in units if "agreement" in u]
+    n = len(xs)
+
+    result: dict[str, Any] = {
+        "n_units": n,
+        "acceptance_rate": round(sum(ys) / n, 6) if n else 0.0,
+        "mean_agreement": round(sum(xs) / n, 6) if n else 0.0,
+        "pearson_r": None,
+        "bins": [],
+    }
+    if n >= 2:
+        x_arr = np.asarray(xs, dtype=np.float64)
+        y_arr = np.asarray(ys, dtype=np.float64)
+        if x_arr.std() > 1e-12 and y_arr.std() > 1e-12:
+            result["pearson_r"] = round(float(np.corrcoef(x_arr, y_arr)[0, 1]), 6)
+
+    edges = list(bins)
+    for low, high in zip(edges, edges[1:]):
+        members = [(x, y) for x, y in zip(xs, ys) if low <= x < high]
+        rate = (sum(y for _, y in members) / len(members)) if members else None
+        result["bins"].append({
+            "low": round(low, 4),
+            "high": round(min(high, 1.0), 4),
+            "midpoint": round((low + min(high, 1.0)) / 2, 4),
+            "n_units": len(members),
+            "acceptability_rate": round(rate, 6) if rate is not None else None,
+        })
+    return result
+
+
+def _mean(values: Iterable[float]) -> float:
+    items = [v for v in values]
+    return sum(items) / len(items) if items else 0.0
+
+
+def summarize(
+    rows: Sequence[dict[str, Any]],
+    prompts: Sequence[PromptSpec] | None = None,
+    router_threshold: float = DEFAULT_THRESHOLD,
+    unit_records: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compute the headline numbers and the go/no-go verdict.
+
+    Returns a dict with the coherence tax averaged by ``rho``, by ``(rho, N)``
+    and by ``(category, rho)``, the best operating point, whether any
+    ``(category, rho)`` cell clears the <5% relative degradation criterion, and
+    -- when the run used ``k > 1`` -- the micro-level consensus curve plus the
+    agreement-vs-quality calibration.
+
+    Args:
+        rows: Sweep rows, from :func:`run_sweep` or :func:`read_rows`.
+        prompts: Optional corpus, enabling the router evaluation block.
+        router_threshold: Threshold for that evaluation.
+        unit_records: Per-consensus-unit records. Defaults to whatever the rows
+            carry in ``_unit_records``; pass the sidecar (:func:`read_unit_rows`)
+            when summarising rows that came back from disk.
+    """
+    fragmented_all = [r for r in rows if r.get("condition") == "fragmented"]
+
+    def _f(row: Mapping[str, Any], key: str, default: float = 0.0) -> float:
+        value = row.get(key, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def tax(row: dict[str, Any], key: str = "coherence_tax_booook") -> float:
+        return _f(row, key)
+
+    def _stable(row: Mapping[str, Any], baseline_key: str) -> bool:
+        """Is this cell's ratio built on a denominator large enough to mean anything?"""
+        if baseline_key not in row or row.get(baseline_key) in ("", None):
+            return True   # older CSVs carry no denominator; do not silently drop them
+        return _f(row, baseline_key) >= MIN_BASELINE
+
+    # The coherence tax (H1) is measured against the monolithic baseline for the
+    # *assembly* pipeline. k is a separate axis (E16) and, as the first real run
+    # showed, a large one: averaging k=1 and k=3 cells into one "tax" reports a
+    # number that belongs to neither. When a run spans several k, the headline is
+    # taken from k=1 and the choice is recorded rather than assumed.
+    ks = sorted({int(_f(r, "k", 1)) for r in fragmented_all})
+    headline_k = min(ks) if len(ks) > 1 else (ks[0] if ks else 1)
+    fragmented = ([r for r in fragmented_all if int(_f(r, "k", 1)) == headline_k]
+                  if len(ks) > 1 else fragmented_all)
+
+    by_rho: dict[float, list[float]] = {}
+    by_rho_grid: dict[float, list[float]] = {}
+    by_rho_n: dict[tuple[float, int], list[float]] = {}
+    by_cat_rho: dict[tuple[str, float], list[float]] = {}
+    rho_achieved: dict[float, list[float]] = {}
+
+    abs_booook: dict[float, list[float]] = {}
+    abs_grid: dict[float, list[float]] = {}
+    unstable = {"booook": 0, "entity_grid": 0}
+
+    for row in fragmented:
+        rho = float(row["rho_target"])
+        n = int(row["n_tasks"])
+        category = str(row["category"])
+        rho_achieved.setdefault(rho, []).append(float(row["rho_achieved"]))
+
+        base_b = _f(row, "baseline_booook")
+        base_g = _f(row, "baseline_entity_grid")
+        # Absolute differences are stable whatever the denominator does.
+        abs_booook.setdefault(rho, []).append(base_b - _f(row, "booook_like_score"))
+        abs_grid.setdefault(rho, []).append(base_g - _f(row, "entity_grid"))
+
+        if _stable(row, "baseline_booook"):
+            by_rho.setdefault(rho, []).append(tax(row))
+            by_rho_n.setdefault((rho, n), []).append(tax(row))
+            by_cat_rho.setdefault((category, rho), []).append(tax(row))
+        else:
+            unstable["booook"] += 1
+            by_rho.setdefault(rho, [])
+        if _stable(row, "baseline_entity_grid"):
+            by_rho_grid.setdefault(rho, []).append(tax(row, "coherence_tax_entity_grid"))
+        else:
+            unstable["entity_grid"] += 1
+            by_rho_grid.setdefault(rho, [])
+
+    curve = [
+        {
+            "rho": rho,
+            "rho_achieved_mean": round(_mean(rho_achieved[rho]), 4),
+            # None, not 0.0: a mean over zero surviving cells is "not measured",
+            # and printing +0.00% there would read as "no degradation".
+            "coherence_tax_booook": round(_mean(values), 6) if values else None,
+            "coherence_tax_entity_grid": (
+                round(_mean(by_rho_grid.get(rho, [])), 6) if by_rho_grid.get(rho) else None),
+            "abs_delta_booook": round(_mean(abs_booook.get(rho, [])), 6),
+            "abs_delta_entity_grid": round(_mean(abs_grid.get(rho, [])), 6),
+            "n_cells": len(values),
+            "n_cells_entity_grid": len(by_rho_grid.get(rho, [])),
+        }
+        for rho, values in sorted(by_rho.items())
+    ]
+
+    category_curve = [
+        {
+            "category": category,
+            "rho": rho,
+            "coherence_tax_booook": round(_mean(values), 6) if values else None,
+            "n_cells": len(values),
+        }
+        for (category, rho), values in sorted(by_cat_rho.items())
+    ]
+
+    # A cell with no surviving measurement cannot pass a criterion, and must not
+    # be able to fail one either: it is absent, not zero.
+    _measured = [c for c in category_curve if c["coherence_tax_booook"] is not None]
+    _measured_curve = [c for c in curve if c["coherence_tax_booook"] is not None]
+    passing = [c for c in _measured if c["coherence_tax_booook"] < 0.05]
+    best_overall = (min(_measured_curve, key=lambda c: c["coherence_tax_booook"])
+                    if _measured_curve else None)
+    best_cell = (min(_measured, key=lambda c: c["coherence_tax_booook"])
+                 if _measured else None)
+
+    # -- micro level: consensus over k replicas ----------------------------
+    # Deliberately over *every* k, not the headline subset: this curve is what
+    # the k axis is for, and restricting it to the headline k would delete it.
+    by_k: dict[int, list[dict[str, Any]]] = {}
+    for row in fragmented_all:
+        try:
+            k_value = int(float(row.get("k", 1) or 1))
+        except (TypeError, ValueError):
+            k_value = 1
+        by_k.setdefault(k_value, []).append(row)
+
+    def _numeric(values: Iterable[Any]) -> list[float]:
+        out: list[float] = []
+        for value in values:
+            try:
+                out.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    consensus_curve = [
+        {
+            "k": k_value,
+            "n_cells": len(cells),
+            "n_families_mean": round(_mean(_numeric(c.get("n_families") for c in cells)), 4),
+            "mean_agreement": round(_mean(_numeric(c.get("mean_agreement") for c in cells)), 6),
+            "frac_high": round(_mean(_numeric(c.get("frac_high") for c in cells)), 6),
+            "frac_medium": round(_mean(_numeric(c.get("frac_medium") for c in cells)), 6),
+            "frac_low": round(_mean(_numeric(c.get("frac_low") for c in cells)), 6),
+            "n_low_conf_regions": sum(int(v) for v in
+                                      _numeric(c.get("n_low_conf_regions") for c in cells)),
+            "coherence_tax_booook": round(_mean([tax(c) for c in cells]), 6),
+        }
+        for k_value, cells in sorted(by_k.items())
+    ]
+
+    units = list(unit_records) if unit_records is not None else [
+        record for row in rows for record in row.get("_unit_records", [])
+    ]
+
+    summary: dict[str, Any] = {
+        "curve": curve,
+        "category_curve": category_curve,
+        "consensus_curve": consensus_curve,
+        "agreement_quality_correlation": agreement_quality_correlation(units),
+        "by_rho_n": [
+            {"rho": rho, "n_tasks": n, "coherence_tax_booook": round(_mean(values), 6)}
+            for (rho, n), values in sorted(by_rho_n.items())
+        ],
+        "best_overall": best_overall,
+        "best_category_cell": best_cell,
+        "go_no_go": {
+            "criterion": "exists (category, rho) with relative coherence degradation < 5%",
+            "passed": bool(passing),
+            "passing_cells": passing,
+        },
+        "n_rows": len(rows),
+        "n_fragmented_cells": len(fragmented),
+        "headline_k": headline_k,
+        "ks_present": ks,
+        "headline_restricted_to_k": len(ks) > 1,
+        "unstable_cells": {
+            "min_baseline": MIN_BASELINE,
+            "excluded_booook": unstable["booook"],
+            "excluded_entity_grid": unstable["entity_grid"],
+            "note": (
+                "cells whose monolithic baseline fell below min_baseline are "
+                "excluded from the relative means: a ratio over a near-zero "
+                "denominator is not a measurement. They are counted here rather "
+                "than dropped quietly, and abs_delta_* in the curve is the "
+                "denominator-free version of the same comparison."
+            ),
+        },
+    }
+
+    if prompts:
+        evaluation = evaluate_router(
+            [(p.text, p.expected_decomposable) for p in prompts], router_threshold
+        )
+        summary["router"] = {
+            "threshold": evaluation.threshold,
+            "accuracy": round(evaluation.accuracy, 4),
+            "precision": round(evaluation.precision, 4),
+            "recall": round(evaluation.recall, 4),
+            "false_positive_rate": round(evaluation.false_positive_rate, 4),
+            "confusion": {
+                "tp": evaluation.true_positive, "fp": evaluation.false_positive,
+                "tn": evaluation.true_negative, "fn": evaluation.false_negative,
+            },
+        }
+    return summary

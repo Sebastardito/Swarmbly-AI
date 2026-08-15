@@ -1,0 +1,210 @@
+# ---------------------------------------------------------------------------
+# Swarmbly AI — .gitignore
+# ---------------------------------------------------------------------------
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Packaging / installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Type checkers / linters
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Environments
+.env
+.env.*
+!.env.example
+.venv
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.python-version
+
+# Jupyter
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# Celery / misc runtime
+celerybeat-schedule
+celerybeat.pid
+*.pid
+*.sock
+
+# ---------------------------------------------------------------------------
+# Swarmbly project outputs
+# ---------------------------------------------------------------------------
+# Benchmark, evaluation and simulation outputs are reproducible artifacts.
+# They are regenerated from committed code + committed configs, so they do not
+# belong in version control. If a specific result must be cited (e.g. in a
+# performance claim in a PR), attach it to the PR or archive it on Zenodo and
+# cite the DOI — see CONTRIBUTING.md.
+results/
+results/**
+runs/
+outputs/
+artifacts/
+*.log
+logs/
+
+# Model weights and large local caches (never commit these)
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+models/
+.cache/
+.huggingface/
+hf_cache/
+
+# Local node state
+*.sqlite
+*.sqlite3
+*.db
+node_state/
+.swarmbly/
+
+# ---------------------------------------------------------------------------
+# macOS
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.AppleDouble
+.LSOverride
+.DocumentRevisions-V100
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+Icon?
+
+# ---------------------------------------------------------------------------
+# Windows / Linux desktop noise
+# ---------------------------------------------------------------------------
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+.directory
+.Trash-*
+.nfs*
+
+# ---------------------------------------------------------------------------
+# Editors and IDEs
+# ---------------------------------------------------------------------------
+# VS Code — keep shared settings, ignore personal ones
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+*.code-workspace
+.history/
+
+# JetBrains
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+*~
+Session.vim
+.netrwhist
+tags
+
+# Emacs
+\#*\#
+.\#*
+*.elc
+auto-save-list/
+tramp
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# Zed / Helix / misc
+.zed/
+.helix/
+
+# ---------------------------------------------------------------------------
+# Documents / build byproducts
+# ---------------------------------------------------------------------------
+# Generated PDFs are built from the committed Markdown sources.
+*.aux
+*.toc
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+_build/
+site/
+.docusaurus/
+
+# ---------------------------------------------------------------------------
+# Secrets — belt and braces. Nothing here should ever be committed.
+# ---------------------------------------------------------------------------
+*.pem
+*.key
+!**/testdata/*.key
+id_rsa*
+id_ed25519*
+secrets.*
+.secrets/
+credentials.json

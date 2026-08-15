@@ -1,0 +1,63 @@
+{
+  "_about": "Labelled prompt corpus for the Swarmbly AI V0 coherence-tax experiment. It serves two purposes: it is the workload swept over rho x N by swarmbly_v0.experiment, and it is the evaluation set for the decomposability router (swarmbly_v0.router.evaluate_router). 'expected_decomposable' is the human label for whether fragmenting this prompt should be safe.",
+  "_label_policy": "expected_decomposable = true when the answer is a set of units that can be produced without knowing what the other units say. It is false when unit i needs the actual output of unit j (multi-hop reasoning, shared program state) or when a single continuous voice must be preserved end to end (creative writing).",
+  "_length_note": "Prompts are deliberately 150-250 tokens. Packet framing (the [TASK t_i] marker) is a fixed per-packet cost, so with a very short prompt and a large N the framing alone pushes the reachable rho floor well above 1.0. Realistic prompt lengths keep the low-rho end of the sweep reachable. swarmbly_v0.packing.packing_floor reports the floor for any prompt/N pair, and unreachable cells are flagged rho_reachable=false rather than silently mislabelled.",
+  "prompts": [
+    {
+      "id": "bulk_extraction_invoices",
+      "category": "bulk_extraction",
+      "expected_decomposable": true,
+      "prompt": "Extract structured fields from each of the 40 invoice records supplied by the Northwind Ledger export. For each record, extract the customer name, the invoice total, the currency code, the issue date, and the payment status. Return one bullet per record, in the original order of the export, using plain field labels and no commentary. Normalise every currency code to its three-letter ISO form and every date to ISO 8601. Where a field is missing from the source record, emit the label with the value 'not present' rather than omitting the label or guessing a value. The records are mutually independent and may be processed separately; do not attempt to reconcile totals across records, and do not carry any assumption from one record into the next. Flag a record as suspect only on the evidence contained in that record itself.",
+      "notes": "Canonical embarrassingly-parallel case. Router should fragment."
+    },
+    {
+      "id": "synthetic_data_tickets",
+      "category": "synthetic_data",
+      "expected_decomposable": true,
+      "prompt": "Generate 120 synthetic customer support tickets for the Aurora Billing product. Each ticket must contain a short subject line, a two-sentence body written in the voice of a frustrated but polite customer, a severity label drawn from low, medium, high, or critical, and a product area drawn from invoicing, payments, refunds, or account access. Produce one ticket per bullet. The samples are independent of one another and can be generated in parallel; variety across the samples matters far more than any relationship between them, so do not build a narrative across tickets and do not reference other tickets. Keep the register neutral and professional throughout, and make sure the severity label is plausible given the body text. Avoid real customer names and real payment card numbers.",
+      "notes": "Independent samples; only the schema is shared. Router should fragment."
+    },
+    {
+      "id": "long_report_energy",
+      "category": "long_report",
+      "expected_decomposable": true,
+      "prompt": "Write a technical report of about 1800 words for a policy audience on the grid-integration cost of distributed solar generation. Organise the report into 6 sections: current deployment levels by region, interconnection queue dynamics and their backlog, distribution-network upgrade costs and who bears them, tariff design responses including net metering reform, storage complementarity and its effect on peak coincidence, and the open questions that the evidence base cannot yet settle. Each section should stand on its own with its own evidence and its own figures, and the sections may be drafted separately by different authors. Use a formal register throughout and keep terminology consistent across sections, since inconsistent naming of the same mechanism is the most common defect in reports of this kind. Do not use marketing language.",
+      "notes": "Sectioned long-form. Fragmentable, but the coherence tax is the interesting part."
+    },
+    {
+      "id": "rag_summarization_filings",
+      "category": "rag_summarization",
+      "expected_decomposable": true,
+      "prompt": "Summarise each of the 12 regulatory filings listed below for an analyst audience. Produce one summary per filing, each no longer than 90 words, covering the filing's scope, the obligations it creates, the entities it binds, and its effective date. Summarise each filing independently and do not carry conclusions from one filing into another, since the filings come from different jurisdictions and a rule in one does not imply a rule in another. Where a filing amends an earlier instrument, name the amended instrument but do not summarise it. Keep every summary in the same formal register and use the same field ordering in each, so that the set can be read as a table. Quote no more than eight consecutive words from any filing.",
+      "notes": "Classic map step over retrieved documents. Router should fragment."
+    },
+    {
+      "id": "evaluation_judging_answers",
+      "category": "evaluation_judging",
+      "expected_decomposable": true,
+      "prompt": "Score each of the 30 candidate answers below against the Helios grading rubric. Rate each answer separately on factual accuracy, completeness, and clarity, using a 1 to 5 scale per criterion, and give one short justification per answer that cites the specific span responsible for the score. Return one bullet per candidate, in the order given. Judgements are independent: the score of one answer must not depend on the scores assigned to any other answer, and you should not normalise or rank the answers against each other. Where an answer is empty or off-topic, score it 1 on every criterion and say so explicitly. Use the same justification format for every candidate so the results can be aggregated mechanically.",
+      "notes": "Per-item judging. Independent by construction. Router should fragment."
+    },
+    {
+      "id": "multi_hop_math_supply",
+      "category": "multi_hop_math",
+      "expected_decomposable": false,
+      "prompt": "Solve the following supply-chain problem step by step, showing your work. First compute the mean weekly demand and its standard deviation from the historical series. Then use that result to derive the reorder point given a lead time of 3 weeks and a target service level of 95 percent. Then substitute the reorder point you derived into the safety-stock equation and calculate the annual holding cost at a carrying rate of 18 percent. Finally, using the holding cost you just computed, determine whether shortening the lead time to 2 weeks pays for itself. Each step depends on the numeric output of the previous step; therefore show every intermediate value you carry forward, and prove that the final figure is consistent with the values derived earlier in the chain.",
+      "notes": "Strict numeric chain. Fragmenting loses the carried values. Router must refuse."
+    },
+    {
+      "id": "code_shared_state_scheduler",
+      "category": "code_shared_state",
+      "expected_decomposable": false,
+      "prompt": "Refactor the task scheduler module so that the retry policy, the backoff timer, and the dead-letter queue all read from a single shared state object instead of each keeping its own module-level globals. The same class must remain the owner of that state and must be the only writer to it. The mutually recursive call path between the dispatcher and the retry handler has to keep working unchanged from the caller's point of view, and every call site across the module must be updated consistently in the same pass, because a half-migrated call site will read stale state and silently drop tasks. Maintaining consistency across the whole module is the entire point of the change, so do not treat the three subsystems as separable units of work.",
+      "notes": "Shared mutable state and cross-cutting invariants. Router must refuse."
+    },
+    {
+      "id": "creative_writing_lighthouse",
+      "category": "creative_writing",
+      "expected_decomposable": false,
+      "prompt": "Write a short story of roughly 1500 words about a lighthouse keeper who slowly realises that the supply boat has stopped coming. Keep a single continuous first-person narrative voice from the opening line to the last, with no section headings and no time skips that the narrator does not notice. The character's tone should darken gradually as the plot advances, so that the register of the final paragraphs is audibly different from the register of the first, while remaining recognisably the same voice. The ending must land as a direct consequence of a detail the narrator noticed earlier and dismissed. Maintaining that continuity of voice and plot is the whole craft of the piece.",
+      "notes": "Voice and plot continuity. Splicing independently written chunks is exactly the failure case."
+    }
+  ]
+}
